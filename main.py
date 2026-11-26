@@ -31,12 +31,23 @@ Deterministic: no input, no network, no randomness, no secrets, no model.
 Writes the exact line to /output/entry.txt and to stdout.
 """
 
+import hashlib
 import os
 import sys
 
 LINE = "Tip: the bar isn't stuck \u2014 it's doing what your agent does: re-reading the same file, hoping it changed."
 
 OUTPUT_PATH = "/output/entry.txt"
+
+# Import-time gate: fail fast at import if the tip ever violates the sealed
+# scorer (1..200 chars, non-blank, single line). ValueError, not assert, so
+# it fires even with python -O and surfaces the violation before main() runs.
+if not (1 <= len(LINE) <= 200):
+    raise ValueError(f"tip is {len(LINE)} chars, must be 1..200")
+if not LINE.strip():
+    raise ValueError("tip is blank")
+if "\n" in LINE or "\r" in LINE:
+    raise ValueError("tip must be a single line")
 
 
 def main() -> int:
@@ -49,15 +60,19 @@ def main() -> int:
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     with open(OUTPUT_PATH, "w", encoding="utf-8", newline="") as f:
         f.write(text)
-    # Revision-pass verification: re-read the file and prove the bytes on disk
-    # are exactly the line, byte for byte. Any mismatch is a hard failure.
+    # Write-back verification: re-read the file and prove the bytes on disk
+    # are exactly the line, byte for byte. The sealed scorer gates on the
+    # file's bytes (1..200 chars, UTF-8, non-blank), so a silent short write
+    # or encoding slip would fail the entry without any error here — compare
+    # sha256 digests, not just lengths, and exit non-zero on any mismatch.
     with open(OUTPUT_PATH, "rb") as f:
         on_disk = f.read()
     expected = text.encode("utf-8")
-    if on_disk != expected:
+    if hashlib.sha256(on_disk).digest() != hashlib.sha256(expected).digest():
         sys.stderr.write(
-            f"VERIFY FAIL: {OUTPUT_PATH} is {len(on_disk)} bytes, "
-            f"expected {len(expected)} bytes\n"
+            f"VERIFY FAIL: {OUTPUT_PATH} sha256 "
+            f"{hashlib.sha256(on_disk).hexdigest()} != expected "
+            f"{hashlib.sha256(expected).hexdigest()}\n"
         )
         return 1
     sys.stdout.write(text)
